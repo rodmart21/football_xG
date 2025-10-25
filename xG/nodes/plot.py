@@ -1,274 +1,277 @@
 import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.patches import Arc, Rectangle
 import pandas as pd
+from scipy.stats import binned_statistic_2d
+from loguru import logger
 
-def create_xg_heatmap(xg_model, figsize=(5, 7), resolution=100, 
-                      shot_technique='Normal', shot_body_part='Right Foot'):
-    """
-    Create an xG heatmap showing probability of scoring from different pitch positions.
+# Now create heatmaps using technique-specific models
+def create_xg_heatmap_grid(x_bins=20, y_bins=13):
+    """Create a grid for xG heatmap."""
+    x_edges = np.linspace(0, 105, x_bins + 1)
+    y_edges = np.linspace(0, 68, y_bins + 1)
+    return x_edges, y_edges
+
+def generate_xg_heatmap(model, df, technique, x_bins=20, y_bins=13):
+    """Generate xG heatmap for a specific technique using its model."""
+    x_edges, y_edges = create_xg_heatmap_grid(x_bins, y_bins)
     
-    Parameters:
-    -----------
-    xg_model : SimpleXGModel
-        Trained xG model
-    figsize : tuple
-        Figure size (width, height)
-    resolution : int
-        Grid resolution (higher = smoother but slower)
-    shot_technique : str
-        Default shot technique to use for prediction
-    shot_body_part : str
-        Default body part to use for prediction
-        
-    Returns:
-    --------
-    fig, ax : matplotlib figure and axes
-    """
+    # Create grid
+    x_centers = (x_edges[:-1] + x_edges[1:]) / 2
+    y_centers = (y_edges[:-1] + y_edges[1:]) / 2
     
-    if not xg_model.is_trained:
-        raise ValueError("Model must be trained before creating heatmap")
+    X_grid, Y_grid = np.meshgrid(x_centers, y_centers)
     
-    # Create grid of positions
-    x_range = np.linspace(60, 120, resolution)  # Only attacking half
-    y_range = np.linspace(0, 80, resolution)
-    X_grid, Y_grid = np.meshgrid(x_range, y_range)
-    
-    # Flatten for predictions
-    positions = np.c_[X_grid.ravel(), Y_grid.ravel()]
-    
-    # Calculate distance and angle for each position
-    goal_x, goal_y = 120, 40
-    dx = goal_x - positions[:, 0]
-    dy = goal_y - positions[:, 1]
-    
-    distances = np.sqrt(dx**2 + dy**2)
-    angles = np.arctan(7.32 * dx / (dx**2 + dy**2 - (7.32/2)**2))
-    angles = np.abs(angles)
-    
-    # Create dataframe for predictions
-    prediction_df = pd.DataFrame({
-        'x': positions[:, 0],
-        'y': positions[:, 1],
-        'dist_to_goal': distances,
-        'angle_to_goal_rad': angles,
-        'shot_technique': shot_technique,
-        'shot_body_part': shot_body_part
+    # Create dataframe for prediction
+    grid_df = pd.DataFrame({
+        'x': X_grid.ravel(),
+        'y': Y_grid.ravel()
     })
     
-    # Get xG predictions
-    xg_values = xg_model.predict_xg(prediction_df)
-    xg_grid = xg_values.reshape(X_grid.shape)
+    # Calculate distance and angle
+    grid_df['dist_to_goal'] = np.sqrt((105 - grid_df['x'])**2 + (34 - grid_df['y'])**2)
+    grid_df['angle_to_goal_rad'] = np.arctan2(
+        abs(grid_df['y'] - 34),
+        105 - grid_df['x']
+    )
     
-    # Create figure
-    fig, ax = plt.subplots(figsize=figsize)
-    ax.set_xlim(60, 120)
-    ax.set_ylim(0, 80)
-    ax.set_aspect('equal')
+    # Add default shot_body_part if needed
+    if 'shot_body_part' in df.columns:
+        # Use most common body part for this technique
+        technique_data = df[df['shot_technique'] == technique]
+        most_common_bodypart = technique_data['shot_body_part'].mode()[0]
+        grid_df['shot_body_part'] = most_common_bodypart
     
-    # Plot heatmap
-    contour = ax.contourf(X_grid, Y_grid, xg_grid, levels=20, cmap='RdYlBu_r', alpha=0.8)
+    # Predict xG using technique-specific model
+    xg_values = model.predict_xg(grid_df)
     
-    # Add colorbar
-    cbar = plt.colorbar(contour, ax=ax, pad=0.02, shrink=0.8)
-    cbar.set_label('Expected Goals (xG)', rotation=270, labelpad=20, fontsize=6)
+    # Reshape to grid
+    xg_grid = xg_values.reshape(y_bins, x_bins)
     
-    # Draw pitch elements (half pitch only)
-    # Pitch outline
-    ax.plot([60, 120, 120, 60, 60], [0, 0, 80, 80, 0], color='black', linewidth=2)
+    return xg_grid, x_edges, 
+
+def generate_xg_heatmap_from_data(df, technique, x_bins=20, y_bins=13):
+    """Generate xG heatmap using actual data range."""
+    technique_data = df[df['shot_technique'] == technique].copy()
     
-    # Center line
-    ax.plot([60, 60], [0, 80], color='black', linewidth=2)
+    if len(technique_data) == 0:
+        return None, None, None
     
-    # Center circle (half)
-    center_circle = Arc((60, 40), 18.3, 18.3, angle=0, theta1=270, theta2=90, 
-                        color='black', linewidth=2, fill=False)
-    ax.add_patch(center_circle)
+    # Use actual data range from the full dataset
+    result = binned_statistic_2d(
+        technique_data['x'], 
+        technique_data['y'],
+        technique_data['xG'],
+        statistic='mean',
+        bins=[x_bins, y_bins],
+        range=[[40, 120], [0, 80]]  # Updated to match your data!
+    )
     
-    # Penalty area
-    penalty_box = Rectangle((102, 18), 18, 44, fill=False, 
-                            edgecolor='black', linewidth=2)
-    ax.add_patch(penalty_box)
+    xg_grid = result.statistic.T
+    x_edges = result.x_edge
+    y_edges = result.y_edge
     
-    # 6-yard box
-    six_yard_box = Rectangle((114, 30), 6, 20, fill=False, 
-                             edgecolor='black', linewidth=2)
-    ax.add_patch(six_yard_box)
-    
-    # Penalty arc
-    penalty_arc = Arc((108, 40), 18.3, 18.3, angle=0, theta1=130, theta2=230, 
-                     color='black', linewidth=2, fill=False)
-    ax.add_patch(penalty_arc)
-    
-    # Penalty spot
-    ax.scatter(108, 40, color='black', s=30, zorder=5)
-    
-    # Goal
-    ax.plot([120, 120], [36, 44], color='black', linewidth=5)
-    
-    # Styling
-    ax.set_facecolor('#2d7a2d')
-    ax.axis('off')
-    
-    plt.title(f'Expected Goals (xG) Heatmap\nTechnique: {shot_technique}, Body Part: {shot_body_part}', 
-              fontsize=7, weight='bold', pad=20)
-    plt.tight_layout()
-    
-    return fig, ax
+    return xg_grid, x_edges, y_edges
 
 
-def create_xg_heatmap_with_shots(xg_model, shots_df, figsize=(5, 7), 
-                                  resolution=100, max_shots=None,
-                                  shot_technique='Normal', shot_body_part='Right Foot'):
+def verify_xg_heatmaps(df):
     """
-    Create xG heatmap with actual shots overlaid.
-    
-    Parameters:
-    -----------
-    xg_model : SimpleXGModel
-        Trained xG model
-    shots_df : pd.DataFrame
-        DataFrame with actual shots
-    figsize : tuple
-        Figure size
-    resolution : int
-        Grid resolution
-    max_shots : int
-        Maximum number of shots to display
-    shot_technique : str
-        Default shot technique for heatmap
-    shot_body_part : str
-        Default body part for heatmap
-        
-    Returns:
-    --------
-    fig, ax : matplotlib figure and axes
+    Comprehensive verification of xG heatmap data and binning.
     """
+    logger.info("=" * 80)
+    logger.info("XG HEATMAP VERIFICATION REPORT")
+    logger.info("=" * 80)
     
-    # Create base heatmap
-    fig, ax = create_xg_heatmap(xg_model, figsize, resolution, 
-                                shot_technique, shot_body_part)
+    # 1. Overall Dataset Check
+    logger.info("\n1. OVERALL DATASET")
+    logger.info("-" * 80)
+    logger.info(f"Total shots: {len(df):,}")
+    logger.info(f"Shots with xG values: {df['xG'].notna().sum():,}")
+    logger.info(f"Missing xG values: {df['xG'].isna().sum()}")
+    logger.info(f"\nxG Statistics:")
+    logger.info(f"  Mean xG: {df['xG'].mean():.4f}")
+    logger.info(f"  Median xG: {df['xG'].median():.4f}")
+    logger.info(f"  Min xG: {df['xG'].min():.4f}")
+    logger.info(f"  Max xG: {df['xG'].max():.4f}")
     
-    # Filter to attacking half
-    shots_attacking = shots_df[shots_df['x'] >= 60].copy()
+    # 2. Coordinate Range Check
+    logger.info("\n2. COORDINATE RANGES")
+    logger.info("-" * 80)
+    logger.info(f"X range: [{df['x'].min():.1f}, {df['x'].max():.1f}]")
+    logger.info(f"Y range: [{df['y'].min():.1f}, {df['y'].max():.1f}]")
+    logger.info(f"Distance range: [{df['dist_to_goal'].min():.1f}, {df['dist_to_goal'].max():.1f}]")
     
-    if max_shots:
-        shots_attacking = shots_attacking.head(max_shots)
+    # Check if any shots fall outside expected range
+    outside_x = df[(df['x'] < 40) | (df['x'] > 120)]
+    outside_y = df[(df['y'] < 0) | (df['y'] > 80)]
+    logger.info(f"\nShots outside [40, 120] x [0, 80] grid:")
+    logger.info(f"  Outside X: {len(outside_x):,}")
+    logger.info(f"  Outside Y: {len(outside_y):,}")
     
-    # Color mapping for outcomes
-    outcome_colors = {
-        'Goal': '#00FF00',
-        'Saved': '#FFA500',
-        'Off T': '#FF0000',
-        'Blocked': '#FFFF00',
-        'Wayward': '#FF69B4',
-        'Post': '#00FFFF',
-    }
+    # 3. Technique Distribution
+    logger.info("\n3. TECHNIQUE DISTRIBUTION")
+    logger.info("-" * 80)
+    technique_counts = df['shot_technique'].value_counts().sort_values(ascending=False)
+    for technique, count in technique_counts.items():
+        pct = 100 * count / len(df)
+        logger.info(f"  {technique:20s}: {count:6,} shots ({pct:5.2f}%)")
     
-    # Plot shots
-    for idx, shot in shots_attacking.iterrows():
-        color = outcome_colors.get(shot.get('shot_outcome', ''), 'white')
+    # 4. Per-Technique Statistics
+    logger.info("\n4. PER-TECHNIQUE XG STATISTICS")
+    logger.info("-" * 80)
+    logger.info(f"{'Technique':<20} {'Count':>8} {'Mean xG':>10} {'Median xG':>10} {'Max xG':>10}")
+    logger.info("-" * 80)
+    for technique in technique_counts.index:
+        tech_data = df[df['shot_technique'] == technique]
+        logger.info(f"{technique:<20} {len(tech_data):>8,} "
+              f"{tech_data['xG'].mean():>10.4f} "
+              f"{tech_data['xG'].median():>10.4f} "
+              f"{tech_data['xG'].max():>10.4f}")
+    
+    # 5. Binning Test
+    logger.info("\n5. BINNING TEST (20x13 grid)")
+    logger.info("-" * 80)
+    
+    from scipy.stats import binned_statistic_2d
+    
+    total_binned = 0
+    for technique in technique_counts.index:
+        tech_data = df[df['shot_technique'] == technique]
         
-        # Larger marker for goals
-        size = 150 if shot.get('shot_outcome') == 'Goal' else 80
+        result = binned_statistic_2d(
+            tech_data['x'], 
+            tech_data['y'],
+            tech_data['xG'],
+            statistic='count',
+            bins=[20, 13],
+            range=[[40, 120], [0, 80]]
+        )
         
-        ax.scatter(shot['x'], shot['y'], 
-                  c=color, s=size, alpha=0.8,
-                  edgecolors='black', linewidth=2,
-                  zorder=10)
+        count_grid = result.statistic.T
+        shots_binned = int(np.nansum(count_grid))
+        bins_filled = np.sum(count_grid > 0)
+        coverage = 100 * shots_binned / len(tech_data)
+        
+        total_binned += shots_binned
+        
+        logger.info(f"{technique:<20}: {shots_binned:>6}/{len(tech_data):>6} binned "
+              f"({coverage:>5.1f}%), {bins_filled:>3}/260 bins filled")
     
-    return fig, ax
+    logger.info(f"{'TOTAL':<20}: {total_binned:>6}/{len(df):>6} binned")
+    
+    # 6. Distance Distribution by Technique
+    logger.info("\n6. DISTANCE DISTRIBUTION BY TECHNIQUE")
+    logger.info("-" * 80)
+    logger.info(f"{'Technique':<20} {'<10m':>7} {'10-20m':>7} {'20-30m':>7} {'>30m':>7}")
+    logger.info("-" * 80)
+    for technique in technique_counts.index:
+        tech_data = df[df['shot_technique'] == technique]
+        d = tech_data['dist_to_goal']
+        
+        under_10 = (d < 10).sum()
+        m10_20 = ((d >= 10) & (d < 20)).sum()
+        m20_30 = ((d >= 20) & (d < 30)).sum()
+        over_30 = (d >= 30).sum()
+        
+        logger.info(f"{technique:<20} {under_10:>7} {m10_20:>7} {m20_30:>7} {over_30:>7}")
+    
+    # 7. Goal Conversion by Technique
+    if 'shot_outcome' in df.columns:
+        logger.info("\n7. GOAL CONVERSION RATES")
+        logger.info("-" * 80)
+        logger.info(f"{'Technique':<20} {'Goals':>7} {'Shots':>7} {'Conv%':>7} {'Avg xG':>9}")
+        logger.info("-" * 80)
+        for technique in technique_counts.index:
+            tech_data = df[df['shot_technique'] == technique]
+            goals = (tech_data['shot_outcome'] == 'Goal').sum()
+            shots = len(tech_data)
+            conv_rate = 100 * goals / shots
+            avg_xg = tech_data['xG'].mean()
+            
+            logger.info(f"{technique:<20} {goals:>7} {shots:>7} {conv_rate:>6.2f}% {avg_xg:>9.4f}")
+    
+    # 8. Data Quality Check
+    logger.info("\n8. DATA QUALITY CHECKS")
+    logger.info("-" * 80)
+    
+    # Check for suspicious values
+    suspicious = []
+    
+    if (df['xG'] < 0).any():
+        suspicious.append(f"⚠️  Negative xG values: {(df['xG'] < 0).sum()}")
+    if (df['xG'] > 1).any():
+        suspicious.append(f"⚠️  xG > 1: {(df['xG'] > 1).sum()}")
+    if df['xG'].isna().any():
+        suspicious.append(f"⚠️  Missing xG: {df['xG'].isna().sum()}")
+    if (df['dist_to_goal'] < 0).any():
+        suspicious.append(f"⚠️  Negative distance: {(df['dist_to_goal'] < 0).sum()}")
+    if (df['dist_to_goal'] > 120).any():
+        suspicious.append(f"⚠️  Distance > 120m: {(df['dist_to_goal'] > 120).sum()}")
+    
+    if suspicious:
+        for issue in suspicious:
+            logger.info(issue)
+    else:
+        logger.info("✅ All data quality checks passed!")
+    
+    # 9. Visual Binning Example
+    logger.info("\n9. SAMPLE BINNING FOR 'NORMAL' SHOTS")
+    logger.info("-" * 80)
+    
+    normal_data = df[df['shot_technique'] == 'Normal']
+    
+    result = binned_statistic_2d(
+        normal_data['x'], 
+        normal_data['y'],
+        normal_data['xG'],
+        statistic='mean',
+        bins=[20, 13],
+        range=[[40, 120], [0, 80]]
+    )
+    
+    xg_grid = result.statistic.T
+    
+    logger.info(f"Grid shape: {xg_grid.shape}")
+    logger.info(f"Bins with data: {np.sum(~np.isnan(xg_grid))}/260")
+    logger.info(f"xG range in bins: [{np.nanmin(xg_grid):.4f}, {np.nanmax(xg_grid):.4f}]")
+    logger.info(f"Mean xG across bins: {np.nanmean(xg_grid):.4f}")
+    
+    # Show a slice of the grid (bins closest to goal)
+    logger.info("\nSample: Last 5 X bins (closest to goal), all Y bins:")
+    logger.info("(Rows = Y position, Cols = X position)")
+    sample = xg_grid[:, -5:]
+    logger.info.info(pd.DataFrame(sample).to_string(float_format='%.3f'))
+    
+    logger.info("\n" + "=" * 80)
+    logger.info("VERIFICATION COMPLETE")
+    logger.info("=" * 80)
 
 
-def compare_xg_by_technique(xg_model, techniques=None, figsize=(7, 5)):
-    """
-    Create side-by-side xG heatmaps for different shot techniques.
+def plot_distance_comparison(df):
+    """Plot distance distributions for different techniques."""
+    import matplotlib.pyplot as plt
     
-    Parameters:
-    -----------
-    xg_model : SimpleXGModel
-        Trained xG model
-    techniques : list
-        List of techniques to compare (None = use common ones)
-    figsize : tuple
-        Figure size
-        
-    Returns:
-    --------
-    fig, axes : matplotlib figure and axes
-    """
+    fig, axes = plt.subplots(2, 4, figsize=(20, 10))
+    axes = axes.flatten()
     
-    if techniques is None:
-        techniques = ['Normal', 'Half Volley', 'Volley', 'Header']
-    
-    n_techniques = len(techniques)
-    fig, axes = plt.subplots(1, n_techniques, figsize=figsize)
-    
-    if n_techniques == 1:
-        axes = [axes]
-    
-    resolution = 80  # Lower resolution for multiple plots
+    techniques = df['shot_technique'].unique()
     
     for idx, technique in enumerate(techniques):
+        tech_data = df[df['shot_technique'] == technique]
+        
         ax = axes[idx]
-        
-        # Create grid
-        x_range = np.linspace(60, 120, resolution)
-        y_range = np.linspace(0, 80, resolution)
-        X_grid, Y_grid = np.meshgrid(x_range, y_range)
-        
-        positions = np.c_[X_grid.ravel(), Y_grid.ravel()]
-        
-        # Calculate features
-        goal_x, goal_y = 120, 40
-        dx = goal_x - positions[:, 0]
-        dy = goal_y - positions[:, 1]
-        distances = np.sqrt(dx**2 + dy**2)
-        angles = np.arctan(7.32 * dx / (dx**2 + dy**2 - (7.32/2)**2))
-        angles = np.abs(angles)
-        
-        prediction_df = pd.DataFrame({
-            'x': positions[:, 0],
-            'y': positions[:, 1],
-            'dist_to_goal': distances,
-            'angle_to_goal_rad': angles,
-            'shot_technique': technique,
-            'shot_body_part': 'Right Foot'
-        })
-        
-        xg_values = xg_model.predict_xg(prediction_df)
-        xg_grid = xg_values.reshape(X_grid.shape)
-        
-        # Plot
-        ax.set_xlim(60, 120)
-        ax.set_ylim(0, 80)
-        ax.set_aspect('equal')
-        
-        contour = ax.contourf(X_grid, Y_grid, xg_grid, levels=20, 
-                             cmap='RdYlBu_r', alpha=0.8, vmin=0, vmax=1)
-        
-        # Draw pitch
-        ax.plot([60, 120, 120, 60, 60], [0, 0, 80, 80, 0], 
-               color='black', linewidth=2)
-        ax.plot([60, 60], [0, 80], color='black', linewidth=2)
-        
-        penalty_box = Rectangle((102, 18), 18, 44, fill=False, 
-                               edgecolor='black', linewidth=2)
-        ax.add_patch(penalty_box)
-        
-        ax.plot([120, 120], [36, 44], color='black', linewidth=5)
-        
-        ax.set_facecolor('#2d7a2d')
-        ax.axis('off')
-        ax.set_title(technique, fontsize=6, weight='bold')
+        ax.hist(tech_data['dist_to_goal'], bins=30, alpha=0.7, 
+                edgecolor='black', color='steelblue')
+        ax.axvline(tech_data['dist_to_goal'].mean(), color='red', 
+                   linestyle='--', linewidth=2, label=f"Mean: {tech_data['dist_to_goal'].mean():.1f}m")
+        ax.set_xlabel('Distance to Goal (m)', fontsize=11)
+        ax.set_ylabel('Count', fontsize=11)
+        ax.set_title(f'{technique} (n={len(tech_data)})', fontsize=13, weight='bold')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
     
-    # Add shared colorbar
-    fig.subplots_adjust(right=0.9)
-    cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
-    cbar = fig.colorbar(contour, cax=cbar_ax)
-    cbar.set_label('xG', rotation=270, labelpad=20, fontsize=6)
+    # Hide unused subplot
+    for idx in range(len(techniques), len(axes)):
+        axes[idx].axis('off')
     
-    plt.suptitle('xG Heatmap Comparison by Shot Technique', 
-                fontsize=8, weight='bold', y=0.98)
-    
-    return fig, axes
+    plt.suptitle('Distance Distribution by Technique', fontsize=16, weight='bold')
+    plt.tight_layout()
+    plt.show()
