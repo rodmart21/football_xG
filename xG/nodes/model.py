@@ -286,7 +286,6 @@ class AdvancedXGModel:
         
         # Polynomial features for distance and angle
         X['dist_squared'] = X['dist_to_goal'] ** 2
-        X['dist_cubed'] = X['dist_to_goal'] ** 3
         X['angle_squared'] = X['angle_to_goal'] ** 2
         
         # Interaction features
@@ -296,7 +295,14 @@ class AdvancedXGModel:
         # Inverse features (closer = higher value)
         X['inverse_dist'] = 1 / (X['dist_to_goal'] + 0.1)
         X['inverse_dist_angle'] = X['inverse_dist'] * X['angle_to_goal']
-        
+
+        # Additional engineered features
+        X['shot_difficulty'] = X['dist_to_goal'] * (1 + X['angle_to_goal'] / np.pi)
+        # Goalkeeper angle (how much goal is "visible")
+        X['goal_angle_visible'] = 2 * np.arctan(7.32 / (2 * X['dist_to_goal']))
+        # Distance from center (shots from center are better)
+        X['lateral_distance'] = abs(df['y'] - 40)  # Assuming pitch width ~80m
+
         # Shot technique (one-hot encoding)
         if 'shot_technique' in df.columns:
             technique_dummies = pd.get_dummies(df['shot_technique'], prefix='technique', drop_first=True)
@@ -471,6 +477,24 @@ class AdvancedXGModel:
             print(f"{row['feature']:30s}: {row['importance']:.4f}")
         print("-" * 60)
     
+    def _show_least_important_features(self, bottom_n=10):
+        """Display least important features from XGBoost model."""
+        if not self.is_trained:
+            print("Model must be trained first.")
+            return
+        
+        importance = pd.DataFrame({
+            'feature': self.feature_names,
+            'importance': self.model.feature_importances_
+        })
+        importance = importance.sort_values('importance', ascending=True)  # Changed to True
+        
+        print(f"\nBOTTOM {bottom_n} LEAST IMPORTANT FEATURES:")
+        print("-" * 60)
+        for idx, row in importance.head(bottom_n).iterrows():
+            print(f"{row['feature']:30s}: {row['importance']:.4f}")
+        print("-" * 60)
+
     def predict_xg(self, df):
         """
         Predict xG (probability of goal) for shots.
